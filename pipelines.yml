@@ -1,0 +1,68 @@
+trigger:
+  branches:
+    include:
+      - maths-formulae-extraction
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  IMAGE_NAME: 'assignment-validation'
+  IMAGE_TAG: '$(Build.BuildId)'
+
+steps:
+- task: UsePythonVersion@0
+  inputs:
+    versionSpec: '3.11'
+    addToPath: true
+
+- script: |
+    python -V
+    pip install --upgrade pip
+    pip install -r requirements.txt
+  displayName: 'Install dependencies'
+
+- script: |
+    mkdir -p reports
+    export PYTHONPATH="$(Build.SourcesDirectory)"
+    pytest -q --junitxml=reports/junit.xml
+  displayName: 'Run tests'
+
+- task: PublishTestResults@2
+  inputs:
+    testResultsFiles: 'reports/junit.xml'
+    testRunTitle: 'pytest results'
+    failTaskOnFailedTests: true
+  displayName: 'Publish test results'
+
+- task: PublishPipelineArtifact@1
+  inputs:
+    targetPath: 'reports'
+    artifact: 'test-reports'
+    publishLocation: 'pipeline'
+  displayName: 'Publish test reports artifact'
+
+# ---- Build Docker image (no push), save as artifact ----
+- task: Docker@2
+  displayName: 'Build Docker image'
+  inputs:
+    command: build
+    dockerfile: '**/Dockerfile'
+    buildContext: '$(Build.SourcesDirectory)'
+    repository: '$(IMAGE_NAME)'
+    tags: |
+      $(IMAGE_TAG)
+      latest
+
+- script: |
+    mkdir -p $(Build.ArtifactStagingDirectory)/docker
+    docker image inspect $(IMAGE_NAME):$(IMAGE_TAG)
+    docker save -o $(Build.ArtifactStagingDirectory)/docker/$(IMAGE_NAME)_$(IMAGE_TAG).tar $(IMAGE_NAME):$(IMAGE_TAG)
+  displayName: 'Save Docker image as tar'
+
+- task: PublishPipelineArtifact@1
+  inputs:
+    targetPath: '$(Build.ArtifactStagingDirectory)/docker'
+    artifact: 'docker-image'
+    publishLocation: 'pipeline'
+  displayName: 'Publish Docker image artifact'
