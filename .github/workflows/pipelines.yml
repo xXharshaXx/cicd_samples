@@ -1,0 +1,112 @@
+name: CI - Tests, Monitoring, and Docker Artifact
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+env:
+  IMAGE_NAME: assignment-validation
+  IMAGE_TAG: ${{ github.run_id }}
+  SMOKE_PATH: /
+  SMOKE_TIMEOUT: "60"
+
+jobs:
+  build-test-and-package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -V
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: |
+          mkdir -p reports
+          export PYTHONPATH="${GITHUB_WORKSPACE}"
+          pytest -q --junitxml=reports/junit.xml
+
+      - name: Publish unit test results to Checks
+        if: always()
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        with:
+          files: reports/junit.xml
+
+      - name: Upload test reports artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: reports
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        run: |
+          DOCKERFILE_PATH="$(git ls-files | grep -Ei '(^|/)[Dd]ockerfile$' | head -n1 || true)"
+          if [ -z "$DOCKERFILE_PATH" ]; then
+            echo "Dockerfile not found"; exit 1
+          fi
+          docker build -f "$DOCKERFILE_PATH" -t "$IMAGE_NAME:$IMAGE_TAG" -t "$IMAGE_NAME:latest" "$GITHUB_WORKSPACE"
+
+      - name: Run Docker image smoke test
+        run: |
+          set -euo pipefail
+          DOCKERFILE_PATH="$(git ls-files | grep -Ei '(^|/)[Dd]ockerfile$' | head -n1 || true)"
+          # Try to detect EXPOSE port; fallback to 8000
+          EXPOSED_PORT="$(awk 'toupper($1)=="EXPOSE"{print $2; exit}' "$DOCKERFILE_PATH" 2>/dev/null || true)"
+          if [ -z "$EXPOSED_PORT" ]; then
+            EXPOSED_PORT=8000
+          fi
+          CONTAINER_NAME="ci_smoke_${IMAGE_NAME}_${IMAGE_TAG}"
+          # Start container
+          docker run -d --rm --name "$CONTAINER_NAME" -p 127.0.0.1:${EXPOSED_PORT}:${EXPOSED_PORT} "$IMAGE_NAME:$IMAGE_TAG" || {
+            echo "Failed to start container"; docker logs "$CONTAINER_NAME" || true; exit 1;
+          }
+          # Wait for HTTP to respond
+          echo "Waiting for service on http://127.0.0.1:${EXPOSED_PORT}${SMOKE_PATH} (timeout ${SMOKE_TIMEOUT}s)"
+          SECS=0
+          until curl -fsS "http://127.0.0.1:${EXPOSED_PORT}${SMOKE_PATH}" >/dev/null; do
+            if ! docker ps --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+              echo "Container exited unexpectedly"; docker logs "$CONTAINER_NAME" || true; exit 1
+            fi
+            if [ "$SECS" -ge "$SMOKE_TIMEOUT" ]; then
+              echo "Timed out waiting for service"; docker logs "$CONTAINER_NAME" || true; exit 1
+            fi
+            sleep 2
+            SECS=$((SECS+2))
+          done
+          echo "Smoke test passed"
+          docker logs "$CONTAINER_NAME" || true
+          docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+
+      - name: Save Docker image as tar
+        run: |
+          mkdir -p "${{ github.workspace }}/artifacts/docker"
+          docker image inspect "$IMAGE_NAME:$IMAGE_TAG"
+          docker save -o "${{ github.workspace }}/artifacts/docker/${IMAGE_NAME}_${IMAGE_TAG}.tar" "$IMAGE_NAME:$IMAGE_TAG"
+
+      - name: Upload Docker image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image
+          path: "${{ github.workspace }}/artifacts/docker"
+
+
