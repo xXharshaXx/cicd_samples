@@ -14,7 +14,7 @@ permissions:
 env:
   IMAGE_NAME: assignment-validation
   IMAGE_TAG: ${{ github.run_id }}
-  SMOKE_PATH: /
+  SMOKE_PATH: /health
   SMOKE_TIMEOUT: "60"
 
 jobs:
